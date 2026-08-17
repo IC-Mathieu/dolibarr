@@ -1029,7 +1029,7 @@ if ($action == 'remove_file') {
 	$langs->load("other");
 	$upload_dir = $diroutputmassaction;
 	$file = $upload_dir.'/'.GETPOST('file');
-	$ret = dol_delete_file($file);
+	$ret = dol_delete_file($file, 1);
 	if ($ret) {
 		setEventMessages($langs->trans("FileWasRemoved", GETPOST('file')), null, 'mesgs');
 	} else {
@@ -1946,7 +1946,7 @@ if (!$error && ($massaction == 'clonetasks' || ($action == 'clonetasks' && $conf
 	if (empty($newproject->public)) {
 		$tmps = $newproject->getProjectsAuthorizedForUser($user, 0, 1, 0, '(fk_statut:=:1)');	// We check only open project (cloning on closed is not allowed)
 		$tmparray = explode(',', $tmps);
-		if (!in_array($newproject->id, $tmparray)) {
+		if (in_array($newproject->id, $tmparray)) {
 			$iscontactofnewproject = 1;
 		}
 	}

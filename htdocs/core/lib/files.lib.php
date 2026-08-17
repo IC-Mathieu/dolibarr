@@ -439,7 +439,8 @@ function completeFileArrayWithDatabaseInfo(&$filearray, $relativedir, $object = 
 	$filearrayindatabase = dol_dir_list_in_database(rtrim($relativedir, "/\\"), '', null, 'name', SORT_ASC, 0, '', $object);
 
 	global $modulepart;
-	if ($modulepart == 'produit' && getDolGlobalInt('PRODUCT_USE_OLD_PATH_FOR_PHOTO')) {
+	// Note: $modulepart is 'product' when set by product/document.php, but 'produit' in some other contexts, so we accept both.
+	if (in_array($modulepart, array('produit', 'product')) && getDolGlobalInt('PRODUCT_USE_OLD_PATH_FOR_PHOTO')) {
 		// TODO Remove this when PRODUCT_USE_OLD_PATH_FOR_PHOTO will be removed
 		global $object;
 		if (!empty($object->id)) {
@@ -452,7 +453,8 @@ function completeFileArrayWithDatabaseInfo(&$filearray, $relativedir, $object = 
 			$relativedirold = preg_replace('/^'.preg_quote(DOL_DATA_ROOT, '/').'/', '', $upload_dirold);
 			$relativedirold = ltrim($relativedirold, "/\\");
 
-			$filearrayindatabase = array_merge($filearrayindatabase, dol_dir_list_in_database($relativedirold, '', null, 'name', SORT_ASC));
+			// Note: $object must be provided so the entity filter matches the one used to forge $upload_dirold (multicompany)
+			$filearrayindatabase = array_merge($filearrayindatabase, dol_dir_list_in_database($relativedirold, '', null, 'name', SORT_ASC, 0, '', $object));
 		}
 	} elseif ($modulepart == 'ticket') {
 		foreach ($filearray as $key => $val) {
@@ -1681,10 +1683,10 @@ function dol_delete_file($file, $disableglob = 0, $nophperrors = 0, $nohook = 0,
 			$ok = true;
 			$globencoded = str_replace('[', '\[', $file_osencoded);
 			$globencoded = str_replace(']', '\]', $globencoded);
-			$listofdir = glob($globencoded);	// This scan dir for files. If file does not exists, return empty.
+			$listoffiles = glob($globencoded);	// This scan dir for files. If file does not exists, return empty.
 
-			if (!empty($listofdir) && is_array($listofdir)) {
-				foreach ($listofdir as $filename) {
+			if (!empty($listoffiles) && is_array($listoffiles)) {
+				foreach ($listoffiles as $filename) {
 					if ($nophperrors) {
 						$ok = @unlink($filename);
 					} else {
@@ -1745,12 +1747,48 @@ function dol_delete_file($file, $disableglob = 0, $nophperrors = 0, $nohook = 0,
 			} else {
 				$ok = unlink($file_osencoded);
 			}
+
+			$filename = $file_osencoded;
+
+			// If it fails and it is because of the missing write permission on parent dir
+			if (!$ok && file_exists(dirname($filename)) && !(fileperms(dirname($filename)) & 0200)) {
+				dol_syslog("Error in deletion, but parent directory exists with no permission to write, we try to change permission on parent directory and retry...", LOG_DEBUG);
+				dolChmod(dirname($filename), decoct(fileperms(dirname($filename)) | 0200));
+				// Now we retry deletion
+				if ($nophperrors) {
+					$ok = @unlink($filename);
+				} else {
+					$ok = unlink($filename);
+				}
+			}
+
 			if ($ok) {
 				if (empty($nolog)) {
-					dol_syslog("Removed file ".$file_osencoded, LOG_DEBUG);
+					dol_syslog("Removed file ".$filename, LOG_DEBUG);
+				}
+
+				// Delete entry into ecm database
+				$rel_filetodelete = preg_replace('/^'.preg_quote(DOL_DATA_ROOT, '/').'/', '', $filename);
+				if (!preg_match('/(\/temp\/|\/thumbs\/|\.meta$)/', $rel_filetodelete)) {     // If not a tmp file
+					if (is_object($db) && $indexdatabase) {		// $db may not be defined when lib is in a context with define('NOREQUIREDB',1)
+						$rel_filetodelete = preg_replace('/^[\\/]/', '', $rel_filetodelete);
+						$rel_filetodelete = preg_replace('/\.noexe$/', '', $rel_filetodelete);
+
+						dol_syslog("Try to remove also entries in database for full relative path = ".$rel_filetodelete, LOG_DEBUG);
+						include_once DOL_DOCUMENT_ROOT.'/ecm/class/ecmfiles.class.php';
+						$ecmfile = new EcmFiles($db);
+						$entity = (isset($object->entity) ? $object->entity : null);
+						$result = $ecmfile->fetch(0, '', $rel_filetodelete, '', '', '', 0, $entity);
+						if ($result >= 0 && $ecmfile->id > 0) {
+							$result = $ecmfile->delete($user);
+						}
+						if ($result < 0) {
+							setEventMessages($ecmfile->error, $ecmfile->errors, 'warnings');
+						}
+					}
 				}
 			} else {
-				dol_syslog("Failed to remove file ".$file_osencoded, LOG_WARNING);
+				dol_syslog("Failed to remove file ".$filename, LOG_WARNING);
 			}
 		}
 
@@ -3407,7 +3445,7 @@ function dol_check_secure_access_document($modulepart, $original_file, $entity, 
 			$accessallowed = 1;
 		}
 		$original_file = $conf->societe->multidir_output[$entity].'/contact/'.$original_file;
-		$sqlprotectagainstexternals = "SELECT fk_soc FROM ".MAIN_DB_PREFIX."socpepople WHERE rowid = ".((int) $refname)." AND entity IN (".getEntity('contact').")";
+		$sqlprotectagainstexternals = "SELECT fk_soc FROM ".MAIN_DB_PREFIX."socpeople WHERE rowid = ".((int) $refname)." AND entity IN (".getEntity('contact').")";
 	} elseif (($modulepart == 'facture' || $modulepart == 'invoice') && !empty($conf->invoice->multidir_output[$entity])) {
 		// Wrapping for invoices
 		if ($fuser->hasRight('facture', $lire) || preg_match('/^specimen/i', $original_file)) {
@@ -4013,7 +4051,7 @@ function dragAndDropFileUpload($htmlname)
 	$out = "";
 	$out .= '<div id="'.$htmlname.'Message" class="dragDropAreaMessage hidden"><span>'.img_picto("", 'download').'<br>'.$langs->trans("DropFileToAddItToObject").'</span></div>';
 	$out .= "\n<!-- JS CODE TO ENABLE DRAG AND DROP OF FILE -->\n";
-	$out .= "<script>";
+	$out .= '<script nonce="'.getNonce().'">';
 	$out .= '
 		jQuery(document).ready(function() {
 			var enterTargetDragDrop = null;
